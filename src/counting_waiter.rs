@@ -8,18 +8,7 @@ const UNPARK_ALL: UnparkToken = UnparkToken(4);
 
 pub struct CountingWaiter(AtomicU64, AtomicBool);
 
-pub enum CountingToken {
-    ByAll(u64),
-    ByOne(u64),
-}
-
-impl CountingToken {
-    fn inner(&self) -> u64 {
-        match self {
-            CountingToken::ByAll(x) | CountingToken::ByOne(x) => *x
-        }
-    }
-}
+pub struct CountingToken(u64);
 
 impl CountingWaiter {
     pub fn new() -> Self {
@@ -28,7 +17,7 @@ impl CountingWaiter {
 
     pub fn notify(&self) {
         if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
-            panic!("Counter overflowed. Don't run me for a year!")
+            panic!("Counter overflowed.")
         }
         if self.1.load(Ordering::Relaxed) {
             self.notify_slow();
@@ -71,10 +60,10 @@ impl CountingWaiter {
     }
 
     pub fn token(&self) -> CountingToken {
-        CountingToken::ByAll(self.0.load(Ordering::Acquire))
+        CountingToken(self.0.load(Ordering::Acquire))
     }
 
-    pub fn wait_token(&self, token: &mut CountingToken) {
+    pub fn wait_token(&self, CountingToken(token): &mut CountingToken) {
         let key = self as *const _ as usize;
 
         let validate = || {
@@ -94,66 +83,5 @@ impl CountingWaiter {
         }
 
         *token = self.0.load(Ordering::Relaxed)
-    }
-
-    /// Hook cannot wait on anything else, or panic.
-    pub unsafe fn wait_hooked(&self, hook: impl FnOnce()) {
-        let key = self as *const _ as usize;
-
-        let validate = || true;
-        let timeout = |_, _| {};
-
-        let waiting = &self.1;
-
-        let hook = move || {
-            waiting.store(true, Ordering::Relaxed);
-            hook();
-        };
-
-        // SAFETY: Caller promised that hook will not wait on anything or panic.
-        park(key, validate, hook, timeout, DEFAULT_PARK_TOKEN, None);
-    }
-
-    /// Hook cannot wait on anything else, or panic.
-    pub unsafe fn wait_hooked_until(
-        &self,
-        mut unlock: impl FnMut(),
-        mut is_done: impl FnMut() -> bool,
-        mut lock_and_validate: impl FnMut() -> ValidateResult,
-    ) {
-        let key = self as *const _ as usize;
-
-        let validate = || true;
-        let timeout = |_, _| {};
-
-        let waiting = &self.1;
-
-        let hook = || {
-            waiting.store(true, Ordering::Relaxed);
-            unlock();
-        };
-
-        // SAFETY: Caller promised that hook will not wait on anything or panic.
-        park(key, validate, hook, timeout, DEFAULT_PARK_TOKEN, None);
-
-        let before_sleep = || {
-            waiting.store(true, Ordering::Relaxed);
-        };
-
-        loop {
-            if !is_done() {
-                // SAFETY: Caller promised that hook will not wait on anything or panic.
-                park(key, validate, before_sleep, timeout, DEFAULT_PARK_TOKEN, None);
-            } else {
-                match lock_and_validate() {
-                    ValidateResult::Abort { run_hook: true } => {
-                        unlock();
-                        return;
-                    }
-                    ValidateResult::Abort { run_hook: false } | ValidateResult::Success => return,
-                    ValidateResult::Retry => unlock(),
-                }
-            }
-        }
     }
 }
